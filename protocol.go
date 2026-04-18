@@ -49,9 +49,17 @@ type Stream struct {
 	ID       uint32
 	dataCh   chan []byte
 	closeCh  chan struct{}
-	closed   atomic.Bool
+	closed   int32 // atomic bool
 	mux      *Multiplexer
 	closeErr error
+}
+
+func (s *Stream) isClosed() bool {
+	return atomic.LoadInt32(&s.closed) != 0
+}
+
+func (s *Stream) setClosed() bool {
+	return atomic.CompareAndSwapInt32(&s.closed, 0, 1)
 }
 
 // Read reads data from the stream
@@ -70,7 +78,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 
 // Write writes data to the stream
 func (s *Stream) Write(p []byte) (int, error) {
-	if s.closed.Load() {
+	if s.isClosed() {
 		return 0, errors.New("stream closed")
 	}
 
@@ -88,7 +96,7 @@ func (s *Stream) Write(p []byte) (int, error) {
 
 // Close closes the stream
 func (s *Stream) Close() error {
-	if s.closed.Swap(true) {
+	if !s.setClosed() {
 		return nil
 	}
 
@@ -112,11 +120,19 @@ type Multiplexer struct {
 	crypto       *CryptoConn
 	streams      map[uint32]*Stream
 	streamsMu    sync.RWMutex
-	nextStreamID atomic.Uint32
+	nextStreamID uint32 // atomic
 	acceptCh     chan *Stream
 	closeCh      chan struct{}
-	closed       atomic.Bool
-	onConnect    func(streamID uint32, addr string) // callback for CONNECT commands
+	closed       int32 // atomic bool
+	onConnect    func(streamID uint32, addr string)
+}
+
+func (m *Multiplexer) isClosed() bool {
+	return atomic.LoadInt32(&m.closed) != 0
+}
+
+func (m *Multiplexer) setClosed() bool {
+	return atomic.CompareAndSwapInt32(&m.closed, 0, 1)
 }
 
 // NewMultiplexer creates a new multiplexer
@@ -137,7 +153,7 @@ func (m *Multiplexer) SetConnectHandler(handler func(streamID uint32, addr strin
 
 // CreateStream creates a new stream
 func (m *Multiplexer) CreateStream() *Stream {
-	id := m.nextStreamID.Add(1)
+	id := atomic.AddUint32(&m.nextStreamID, 1)
 	stream := &Stream{
 		ID:      id,
 		dataCh:  make(chan []byte, 64),
@@ -219,7 +235,7 @@ func (m *Multiplexer) Run() error {
 
 		case CmdData:
 			stream := m.GetStream(frame.StreamID)
-			if stream != nil && !stream.closed.Load() {
+			if stream != nil && !stream.isClosed() {
 				select {
 				case stream.dataCh <- frame.Data:
 				default:
@@ -230,7 +246,7 @@ func (m *Multiplexer) Run() error {
 		case CmdClose:
 			stream := m.GetStream(frame.StreamID)
 			if stream != nil {
-				stream.closed.Store(true)
+				atomic.StoreInt32(&stream.closed, 1)
 				close(stream.dataCh)
 				m.RemoveStream(frame.StreamID)
 			}
@@ -250,14 +266,14 @@ func (m *Multiplexer) Accept() (*Stream, error) {
 
 // Close closes the multiplexer
 func (m *Multiplexer) Close() error {
-	if m.closed.Swap(true) {
+	if !m.setClosed() {
 		return nil
 	}
 	close(m.closeCh)
 
 	m.streamsMu.Lock()
 	for _, stream := range m.streams {
-		stream.closed.Store(true)
+		atomic.StoreInt32(&stream.closed, 1)
 		close(stream.dataCh)
 	}
 	m.streams = make(map[uint32]*Stream)

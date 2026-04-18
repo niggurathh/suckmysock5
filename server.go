@@ -5,7 +5,6 @@ import (
 	"log"
 	"net"
 	"sync"
-	"sync/atomic"
 )
 
 // Server represents the reverse SOCKS5 proxy server
@@ -15,7 +14,6 @@ type Server struct {
 	key        []byte
 	mux        *Multiplexer
 	muxMu      sync.RWMutex
-	nextStream atomic.Uint32
 }
 
 // NewServer creates a new server instance
